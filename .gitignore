@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment files
+.env
+
+# Editor and OS
+.vscode/
+.DS_Store
+
+# Node leftovers
+node_modules/
+
+# Logs
+logs/
+*.log   
+
+#   Coverage reports
+coverage/       
+
+#Documentos Internos
+Documentos Internos - NO PUBLICAR/
+*.docx
+*.xlsx
+*.pdf

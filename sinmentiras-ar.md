@@ -1,0 +1,71 @@
+🏛️ #Proyecto: SinMentiras.org por IAAUTOMATIONS
+
+
+1. ##Visión y Propósito
+
+Nombre del Producto: SinMentiras.org (Búnker) / SinMentiras.ar (Frontal)
+
+Objetivo: Convertirse en el estándar de oro de la integridad de datos legislativos en Argentina, posicionando a IAAUTOMATIONS como líder en auditoría algorítmica.
+
+Filosofía: "Asesino con carisma" — Frialdad técnica, metodología inexpugnable y transparencia radical.
+
+
+2. ##Propuesta de Valor (Branding y Marketing)
+
+Identidad Visual: Terminal de alta precisión (estilo Bloomberg/Citi).
+
+Valor Core: Verdad técnica basada en evidencia documental inmutable.
+
+Transparencia Activa: Publicación de la metodología y los "System Prompts" para eliminar cualquier acusación de sesgo político.
+
+
+3. ##Arquitectura Técnica (Implementación Senior)
+
+    - A. Ingesta y Adquisición (The Pipe)
+
+    Orquestador: n8n (Docker) corriendo en red privada.
+
+    Fuentes: Scrapping automatizado del BORA (Boletín Oficial), Cámaras de Diputados y Senadores.
+
+    Seguridad de Datos: Registro de Hash SHA-256 por cada PDF original para garantizar que la fuente no fue alterada.
+
+    - B. Inteligencia y Optimización
+
+    RAG Determínistico: Uso de embeddings vectoriales (Postgres + pgvector) para recuperar fragmentos exactos de la ley.
+
+    Control de Alucinaciones: Temperatura 0 en los modelos de lenguaje y validación cruzada entre artículos.
+
+    - C. Política de Transparencia de Código
+
+    Público: Lógica de Scoring, System Prompts y Frontend de React.
+
+    Privado: Pipelines de n8n, gestión de secretos (.env), bases de datos KYC y configuración de infraestructura blindada.
+
+
+4. ##Blindaje Legal y Patrimonial (Estrategia Zero Trust)
+
+    - A. Geopolítica Legal
+
+    Jurisdicción: Operación desde Brasil (asimetría legal y fricción por exhortos internacionales).
+
+    Insolvencia Táctica: Titular en Situación 5 (BCRA), lo que anula el incentivo económico para demandas de daños y perjuicios.
+
+    - B. Estructura de Activos
+
+    Dominios: El .org actúa como búnker internacional inalcanzable para NIC Argentina.
+
+    Fideicomiso: Canalización de futuros ingresos (Consultoría B2B) a través de un fideicomiso de administración para separación patrimonial absoluta y planificación sucesoria.
+
+
+5. ##Cronograma de Ejecución: MVP (7 Días)
+
+    - Día 1: Setup de VPS Blindado, Docker y Túneles Zero Trust.
+    - Día 2: Pipeline de Ingesta Forense (OCR + Hashing de PDFs).
+    - Día 3: Desarrollo del Cerebro RAG (Prompts determinísticos).
+    - Día 4: Frontend MVP (React) y API de búsqueda.
+    - Día 5: Protocolo de Identidad (KYC para Derecho a Réplica).
+    - Día 6: Hardening de seguridad y refinamiento de tono de IA.
+    - Día 7: Lanzamiento oficial de SinMentiras.org.
+
+Desarrollado por: IAAUTOMATIONS - Sistemas de IA y Agentes.
+iaautomations.com

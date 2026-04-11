@@ -1,0 +1,86 @@
+import json
+import sqlite3
+from pathlib import Path
+from threading import Lock
+
+from app.core.config import settings
+
+
+class RAGStore:
+    def __init__(self) -> None:
+        self._lock = Lock()
+
+    @property
+    def db_path(self) -> str:
+        return settings.RAG_DB_PATH
+
+    def _connect(self) -> sqlite3.Connection:
+        db_file = Path(self.db_path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(str(db_file))
+
+    def initialize(self) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS rag_chunks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        document_id TEXT NOT NULL,
+                        source_uri TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        chunk_text TEXT NOT NULL,
+                        metadata_json TEXT,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rag_chunks_source_uri ON rag_chunks(source_uri)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rag_chunks_document_id ON rag_chunks(document_id)"
+                )
+
+    def ingest_document(
+        self,
+        *,
+        document_id: str,
+        source_uri: str,
+        chunks: list[str],
+        metadata: dict[str, str] | None,
+        replace_existing: bool,
+    ) -> int:
+        self.initialize()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=True)
+
+        with self._lock:
+            with self._connect() as conn:
+                if replace_existing:
+                    conn.execute("DELETE FROM rag_chunks WHERE source_uri = ?", (source_uri,))
+
+                conn.executemany(
+                    """
+                    INSERT INTO rag_chunks(document_id, source_uri, chunk_index, chunk_text, metadata_json)
+                    VALUES(?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (document_id, source_uri, index, chunk, metadata_json)
+                        for index, chunk in enumerate(chunks)
+                    ],
+                )
+                conn.commit()
+
+        return len(chunks)
+
+    def list_chunks(self) -> list[dict[str, str]]:
+        self.initialize()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT chunk_text, source_uri FROM rag_chunks ORDER BY source_uri, chunk_index"
+            ).fetchall()
+
+        return [{"text": row[0], "source": row[1]} for row in rows]
+
+
+rag_store = RAGStore()
