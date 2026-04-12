@@ -1,0 +1,72 @@
+{
+  "total": 5,
+  "passed": 4,
+  "failed": 1,
+  "rows": [
+    {
+      "test": "health",
+      "endpoint": "/api/v1/health",
+      "pass": true,
+      "status_code": 200,
+      "latency_ms": 3.91,
+      "detail": "OK"
+    },
+    {
+      "test": "ingest_law",
+      "endpoint": "/api/v1/rag/ingest/law",
+      "pass": true,
+      "status_code": 200,
+      "latency_ms": 3191.31,
+      "detail": "OK"
+    },
+    {
+      "test": "answer",
+      "endpoint": "/api/v1/rag/answer",
+      "pass": true,
+      "status_code": 200,
+      "latency_ms": 14206.63,
+      "detail": "OK"
+    },
+    {
+      "test": "truth_index",
+      "endpoint": "/api/v1/rag/truth-index",
+      "pass": false,
+      "status_code": 500,
+      "latency_ms": 3.38,
+      "detail": "{'detail': \"'LocalRAGService' object has no attribute 'calculate_truth_index'\"}"
+    },
+    {
+      "test": "agent_chat",
+      "endpoint": "/api/v1/agent/chat",
+      "pass": true,
+      "status_code": 200,
+      "latency_ms": 6922.27,
+      "detail": "OK"
+    }
+  ],
+  "chunking_validation": {
+    "law_id": 20744,
+    "chunk_count": 276,
+    "expected_chunks": 276,
+    "baseline_min": 200,
+    "baseline_max": 400,
+    "source_actualizado": "https://servicios.infoleg.gob.ar/infolegInternet/anexos/25000-29999/25552/texact.htm",
+    "has_sha256": true
+  },
+  "agent_chat_response": {
+    "id": "AUD-2026-E39559",
+    "query": "Es cierto que la Ley 27.275 regula el acceso a la información pública en Argentina?",
+    "verdict": "VERDADERO",
+    "summary_ia": "La Ley 27.275 efectivamente regula el acceso a la información pública en Argentina, estableciendo derechos y procedimientos para su ejercicio. Esta ley busca garantizar la transparencia y el derecho de los ciudadanos a acceder a información pública.",
+    "hash": "sha256:bcde971a22eca5927ee5f8d35ea3d0a9394d8bf500816885dade8f8d292a7417",
+    "source_law": "Ley 27.275 - TÍTULO I",
+    "source_url": "https://servicios.infoleg.gob.ar/infolegInternet/anexos/265000-269999/265949/texact.htm",
+    "original_text": "DERECHO DE ACCESO A LA INFORMACIÓN PÚBLICA Ley 27275 Objeto. Excepciones. Alcances.",
+    "highlights": [
+      "Ley 27.275",
+      "acceso a la información pública"
+    ],
+    "news_context": [],
+    "used_model": "gpt-4o-mini"
+  }
+}
