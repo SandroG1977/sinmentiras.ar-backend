@@ -104,6 +104,38 @@ class RAGStore:
                             cur.execute(
                                 "CREATE INDEX IF NOT EXISTS idx_rag_embeddings_text_hash ON rag_embeddings(text_hash)"
                             )
+                            cur.execute(
+                                """
+                                CREATE TABLE IF NOT EXISTS rag_laws (
+                                    law_id INTEGER PRIMARY KEY,
+                                    law_number TEXT NOT NULL,
+                                    title TEXT NOT NULL,
+                                    hash_tag TEXT NOT NULL,
+                                    source_link TEXT NOT NULL,
+                                    promulgated_on TEXT,
+                                    keywords_json JSONB,
+                                    summary_text TEXT,
+                                    last_document_id TEXT,
+                                    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                                )
+                                """
+                            )
+                            cur.execute(
+                                "CREATE INDEX IF NOT EXISTS idx_rag_laws_law_number ON rag_laws(law_number)"
+                            )
+                            cur.execute(
+                                "CREATE INDEX IF NOT EXISTS idx_rag_laws_hash_tag ON rag_laws(hash_tag)"
+                            )
+                            cur.execute(
+                                "ALTER TABLE rag_laws ADD COLUMN IF NOT EXISTS promulgated_on TEXT"
+                            )
+                            cur.execute(
+                                "ALTER TABLE rag_laws ADD COLUMN IF NOT EXISTS keywords_json JSONB"
+                            )
+                            cur.execute(
+                                "ALTER TABLE rag_laws ADD COLUMN IF NOT EXISTS summary_text TEXT"
+                            )
                         conn.commit()
                     return
                 except Exception:
@@ -144,6 +176,335 @@ class RAGStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_rag_embeddings_text_hash ON rag_embeddings(text_hash)"
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS rag_laws (
+                        law_id INTEGER PRIMARY KEY,
+                        law_number TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        hash_tag TEXT NOT NULL,
+                        source_link TEXT NOT NULL,
+                        promulgated_on TEXT,
+                        keywords_json TEXT,
+                        summary_text TEXT,
+                        last_document_id TEXT,
+                        ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rag_laws_law_number ON rag_laws(law_number)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rag_laws_hash_tag ON rag_laws(hash_tag)"
+                )
+                columns = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(rag_laws)").fetchall()
+                }
+                if "promulgated_on" not in columns:
+                    conn.execute("ALTER TABLE rag_laws ADD COLUMN promulgated_on TEXT")
+                if "keywords_json" not in columns:
+                    conn.execute("ALTER TABLE rag_laws ADD COLUMN keywords_json TEXT")
+                if "summary_text" not in columns:
+                    conn.execute("ALTER TABLE rag_laws ADD COLUMN summary_text TEXT")
+
+    def upsert_law_catalog_entry(
+        self,
+        *,
+        law_id: int,
+        law_number: str,
+        title: str,
+        hash_tag: str,
+        source_link: str,
+        promulgated_on: str | None,
+        keywords: list[str],
+        summary_text: str | None,
+        last_document_id: str | None,
+    ) -> None:
+        """Upsert del catalogo de leyes para consultas y trazabilidad de ingestas."""
+
+        self.initialize()
+        keywords_json = json.dumps(keywords, ensure_ascii=True)
+
+        # Try Postgres first.
+        if self._use_postgres_configured and self._is_postgres_available():
+            try:
+                with self._lock:
+                    with self._connect_postgres() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                INSERT INTO rag_laws(
+                                    law_id,
+                                    law_number,
+                                    title,
+                                    hash_tag,
+                                    source_link,
+                                    promulgated_on,
+                                    keywords_json,
+                                    summary_text,
+                                    last_document_id,
+                                    ingested_at,
+                                    updated_at
+                                )
+                                VALUES(%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, NOW(), NOW())
+                                ON CONFLICT(law_id)
+                                DO UPDATE SET
+                                    law_number = EXCLUDED.law_number,
+                                    title = EXCLUDED.title,
+                                    hash_tag = EXCLUDED.hash_tag,
+                                    source_link = EXCLUDED.source_link,
+                                    promulgated_on = EXCLUDED.promulgated_on,
+                                    keywords_json = EXCLUDED.keywords_json,
+                                    summary_text = EXCLUDED.summary_text,
+                                    last_document_id = EXCLUDED.last_document_id,
+                                    ingested_at = NOW(),
+                                    updated_at = NOW()
+                                """,
+                                (
+                                    law_id,
+                                    law_number,
+                                    title,
+                                    hash_tag,
+                                    source_link,
+                                    promulgated_on,
+                                    keywords_json,
+                                    summary_text,
+                                    last_document_id,
+                                ),
+                            )
+                        conn.commit()
+                return
+            except Exception:
+                pass
+
+        # Fallback to SQLite.
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO rag_laws(
+                        law_id,
+                        law_number,
+                        title,
+                        hash_tag,
+                        source_link,
+                        promulgated_on,
+                        keywords_json,
+                        summary_text,
+                        last_document_id,
+                        ingested_at,
+                        updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT(law_id)
+                    DO UPDATE SET
+                        law_number = excluded.law_number,
+                        title = excluded.title,
+                        hash_tag = excluded.hash_tag,
+                        source_link = excluded.source_link,
+                        promulgated_on = excluded.promulgated_on,
+                        keywords_json = excluded.keywords_json,
+                        summary_text = excluded.summary_text,
+                        last_document_id = excluded.last_document_id,
+                        ingested_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        law_id,
+                        law_number,
+                        title,
+                        hash_tag,
+                        source_link,
+                        promulgated_on,
+                        keywords_json,
+                        summary_text,
+                        last_document_id,
+                    ),
+                )
+                conn.commit()
+
+    def get_law_catalog_entry(self, law_id: int) -> dict[str, object] | None:
+        """Obtiene una ley del catalogo por numero para validaciones y APIs futuras."""
+
+        self.initialize()
+
+        # Try Postgres first.
+        if self._use_postgres_configured and self._is_postgres_available():
+            try:
+                with self._connect_postgres() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT law_id, law_number, title, hash_tag, source_link, promulgated_on, keywords_json, summary_text, last_document_id, ingested_at
+                            FROM rag_laws
+                            WHERE law_id = %s
+                            LIMIT 1
+                            """,
+                            (law_id,),
+                        )
+                        row = cur.fetchone()
+                if not row:
+                    return None
+                parsed_keywords = row[6] if isinstance(row[6], list) else []
+                return {
+                    "law_id": row[0],
+                    "law_number": row[1],
+                    "title": row[2],
+                    "hash_tag": row[3],
+                    "source_link": row[4],
+                    "promulgated_on": row[5],
+                    "keywords": parsed_keywords,
+                    "summary_text": row[7],
+                    "last_document_id": row[8],
+                    "ingested_at": row[9].isoformat() if row[9] else None,
+                }
+            except Exception:
+                pass
+
+        # Fallback to SQLite.
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT law_id, law_number, title, hash_tag, source_link, promulgated_on, keywords_json, summary_text, last_document_id, ingested_at
+                    FROM rag_laws
+                    WHERE law_id = ?
+                    LIMIT 1
+                    """,
+                    (law_id,),
+                ).fetchone()
+            if not row:
+                return None
+            raw_keywords = row[6] or "[]"
+            try:
+                parsed_keywords = json.loads(raw_keywords)
+            except json.JSONDecodeError:
+                parsed_keywords = []
+
+            return {
+                "law_id": row[0],
+                "law_number": row[1],
+                "title": row[2],
+                "hash_tag": row[3],
+                "source_link": row[4],
+                "promulgated_on": row[5],
+                "keywords": (
+                    parsed_keywords if isinstance(parsed_keywords, list) else []
+                ),
+                "summary_text": row[7],
+                "last_document_id": row[8],
+                "ingested_at": row[9],
+            }
+        except Exception:
+            return None
+
+    def search_law_catalog(
+        self, query: str, limit: int = 10
+    ) -> list[dict[str, object]]:
+        """Busca leyes por numero, titulo, hashtag, keywords o resumen."""
+
+        self.initialize()
+        normalized = query.strip().lower()
+        if not normalized or limit <= 0:
+            return []
+
+        like_term = f"%{normalized}%"
+
+        if self._use_postgres_configured and self._is_postgres_available():
+            try:
+                with self._connect_postgres() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT law_id, law_number, title, hash_tag, source_link,
+                                   promulgated_on, keywords_json, summary_text,
+                                   last_document_id, ingested_at
+                            FROM rag_laws
+                            WHERE LOWER(law_number) LIKE %s
+                               OR LOWER(title) LIKE %s
+                               OR LOWER(hash_tag) LIKE %s
+                               OR LOWER(COALESCE(CAST(keywords_json AS TEXT), '')) LIKE %s
+                               OR LOWER(COALESCE(summary_text, '')) LIKE %s
+                            ORDER BY updated_at DESC
+                            LIMIT %s
+                            """,
+                            (
+                                like_term,
+                                like_term,
+                                like_term,
+                                like_term,
+                                like_term,
+                                limit,
+                            ),
+                        )
+                        rows = cur.fetchall()
+
+                return [
+                    {
+                        "law_id": row[0],
+                        "law_number": row[1],
+                        "title": row[2],
+                        "hash_tag": row[3],
+                        "source_link": row[4],
+                        "promulgated_on": row[5],
+                        "keywords": row[6] if isinstance(row[6], list) else [],
+                        "summary_text": row[7],
+                        "last_document_id": row[8],
+                        "ingested_at": row[9].isoformat() if row[9] else None,
+                    }
+                    for row in rows
+                ]
+            except Exception:
+                pass
+
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT law_id, law_number, title, hash_tag, source_link,
+                           promulgated_on, keywords_json, summary_text,
+                           last_document_id, ingested_at
+                    FROM rag_laws
+                    WHERE LOWER(law_number) LIKE ?
+                       OR LOWER(title) LIKE ?
+                       OR LOWER(hash_tag) LIKE ?
+                       OR LOWER(COALESCE(keywords_json, '')) LIKE ?
+                       OR LOWER(COALESCE(summary_text, '')) LIKE ?
+                    ORDER BY datetime(updated_at) DESC
+                    LIMIT ?
+                    """,
+                    (like_term, like_term, like_term, like_term, like_term, limit),
+                ).fetchall()
+
+            out: list[dict[str, object]] = []
+            for row in rows:
+                raw_keywords = row[6] or "[]"
+                try:
+                    parsed_keywords = json.loads(raw_keywords)
+                except json.JSONDecodeError:
+                    parsed_keywords = []
+                out.append(
+                    {
+                        "law_id": row[0],
+                        "law_number": row[1],
+                        "title": row[2],
+                        "hash_tag": row[3],
+                        "source_link": row[4],
+                        "promulgated_on": row[5],
+                        "keywords": (
+                            parsed_keywords if isinstance(parsed_keywords, list) else []
+                        ),
+                        "summary_text": row[7],
+                        "last_document_id": row[8],
+                        "ingested_at": row[9],
+                    }
+                )
+            return out
+        except Exception:
+            return []
 
     def ingest_document(
         self,
@@ -192,7 +553,6 @@ class RAGStore:
         if not rows_to_insert:
             return 0
 
-        # Try Postgres first if configured and available
         if self._use_postgres_configured and self._is_postgres_available():
             try:
                 with self._lock:
@@ -223,10 +583,8 @@ class RAGStore:
                         conn.commit()
                 return len(rows_to_insert)
             except Exception:
-                # Fallback to SQLite
                 pass
 
-        # Fallback to SQLite
         with self._lock:
             with self._connect() as conn:
                 if replace_existing:

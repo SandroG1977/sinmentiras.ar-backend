@@ -8,7 +8,7 @@ router = APIRouter()
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
-    result, used_model, retrieved_chunks = run_agent(payload.prompt)
+    result, used_model, retrieved_chunks = run_agent(payload.prompt, payload.top_k)
 
     news_context = [
         NewsContext(

@@ -7,7 +7,7 @@ client = TestClient(app)
 
 
 def test_agent_chat_includes_chunks_used(monkeypatch) -> None:
-    def fake_run_agent(prompt: str):
+    def fake_run_agent(prompt: str, top_k: int | None = None):
         return (
             {
                 "verdict": "VERDADERO",
@@ -59,3 +59,38 @@ def test_agent_chat_includes_chunks_used(monkeypatch) -> None:
     first_chunk = data["chunks_used"][0]
     assert first_chunk["metadata"]["articulo_ref"] == "197"
     assert first_chunk["metadata"]["law_id"] == 20744
+
+
+def test_agent_chat_forwards_top_k_to_agent(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_agent(prompt: str, top_k: int | None = None):
+        captured["prompt"] = prompt
+        captured["top_k"] = top_k
+        return (
+            {
+                "verdict": "INCONSISTENCIA TÉCNICA",
+                "summary_ia": "respuesta",
+                "source_law": "",
+                "source_url": "",
+                "original_text": "",
+                "highlights": [],
+                "news_context": [],
+            },
+            "mock",
+            [],
+        )
+
+    monkeypatch.setattr("app.api.v1.endpoints.chat.run_agent", fake_run_agent)
+
+    response = client.post(
+        "/api/v1/agent/chat",
+        json={
+            "prompt": "consulta",
+            "top_k": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["prompt"] == "consulta"
+    assert captured["top_k"] == 7

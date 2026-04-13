@@ -10,10 +10,14 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
 from app.services.embedding_service import embedding_service
 from app.services.rag_store import rag_store
+from app.services.question_cache_store import question_cache_store
 
 
 @dataclass
@@ -196,8 +200,8 @@ class LocalRAGService:
         numero_ley: int,
         tipo_norma: int = 1,
         anio_sancion: str = "",
-    ) -> tuple[int, str]:
-        """Busca el id interno de InfoLEG a partir del número de ley."""
+    ) -> tuple[int, str, str | None]:
+        """Busca id interno de InfoLEG y resumen oficial desde buscarNormas HTML."""
 
         search_url = (
             f"{self._INFOLEG_BASE}/buscarNormas.do?tipoNorma={tipo_norma}"
@@ -217,7 +221,69 @@ class LocalRAGService:
                 f"No se pudo extraer idNorma para la ley {numero_ley} desde Infoleg"
             )
 
-        return int(match.group(1)), search_url
+        infoleg_id = int(match.group(1))
+        official_summary = self._extract_infoleg_summary_from_search_html(
+            response.text,
+            numero_ley=numero_ley,
+            infoleg_id=infoleg_id,
+        )
+        return infoleg_id, search_url, official_summary
+
+    @staticmethod
+    def _extract_infoleg_summary_from_search_html(
+        search_html: str,
+        *,
+        numero_ley: int,
+        infoleg_id: int,
+    ) -> str | None:
+        """Extrae la descripción oficial de la fila de resultados en buscarNormas."""
+
+        try:
+            soup = BeautifulSoup(search_html, "html.parser")
+            target_anchor = None
+            for anchor in soup.find_all("a", href=True):
+                href = str(anchor.get("href", ""))
+                if "verNorma.do" not in href:
+                    continue
+                if f"id={infoleg_id}" in href:
+                    target_anchor = anchor
+                    break
+
+            if target_anchor is None:
+                # Fallback por texto de la ley si no se encontró por id.
+                needle = f"{numero_ley}"
+                for anchor in soup.find_all("a", href=True):
+                    if "verNorma.do" not in str(anchor.get("href", "")):
+                        continue
+                    if needle in anchor.get_text(" ", strip=True):
+                        target_anchor = anchor
+                        break
+
+            if target_anchor is None:
+                return None
+
+            row = target_anchor.find_parent("tr")
+            if row is None:
+                return None
+
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                return None
+
+            # Estructura habitual: [identificador/norma, fecha, descripcion].
+            # Elegimos la celda con más contenido textual entre las celdas no-identificador.
+            candidates = [
+                re.sub(r"\s+", " ", td.get_text(" ", strip=True)).strip()
+                for td in cells[1:]
+            ]
+            candidates = [text for text in candidates if text]
+            if not candidates:
+                return None
+
+            best = max(candidates, key=len)
+            return best or None
+        except Exception:
+            return None
 
     def _url_ver_norma(self, infoleg_id: int) -> str:
         """Construye la URL de verNorma para una norma de InfoLEG."""
@@ -228,14 +294,14 @@ class LocalRAGService:
         """Genera una URL de texto actualizado cuando no se pudo descubrir desde HTML."""
 
         low = (infoleg_id // 5000) * 5000
-        high = low + 9999
+        high = low + 4999
         return f"{self._INFOLEG_ATTACH_BASE}/{low}-{high}/{infoleg_id}/texact.htm"
 
     def _url_norma_fallback(self, infoleg_id: int) -> str:
         """Genera una URL de norma base cuando no se pudo inferir desde texact."""
 
         low = (infoleg_id // 5000) * 5000
-        high = low + 9999
+        high = low + 4999
         return f"{self._INFOLEG_ATTACH_BASE}/{low}-{high}/{infoleg_id}/norma.htm"
 
     def _url_vinculos(self, infoleg_id: int, modo: int) -> str:
@@ -253,8 +319,8 @@ class LocalRAGService:
                 texact_url,
                 flags=re.IGNORECASE,
             )
-        low = (infoleg_id // 10000) * 10000
-        high = low + 9999
+        low = (infoleg_id // 5000) * 5000
+        high = low + 4999
         return f"{self._INFOLEG_ATTACH_BASE}/{low}-{high}/{infoleg_id}/norma.htm"
 
     def _extraer_url_texact_desde_ver_norma(
@@ -524,6 +590,158 @@ class LocalRAGService:
         return text
 
     # Ingesta de normas desde InfoLEG.
+    @staticmethod
+    def _build_law_hashtag(law_id: int, title_text: str) -> str:
+        """Genera hashtag canonico para identificar rapidamente una ley en el catalogo."""
+
+        base = re.sub(r"[^a-z0-9]+", "", title_text.lower())[:24]
+        if not base:
+            base = "ley"
+        return f"#ley{law_id}{base}"
+
+    @staticmethod
+    def _extract_promulgated_on(texto_fuente: str) -> str | None:
+        """Extrae fecha de promulgacion cuando aparece en el texto de la norma."""
+
+        match = re.search(
+            r"promulgad[ao]\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",
+            texto_fuente,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def _derive_law_title(
+        law_id: int,
+        soup_title: str | None,
+        texto_fuente: str,
+    ) -> str:
+        """Obtiene un título útil de la ley, evitando títulos genéricos del portal."""
+
+        raw_title = (soup_title or "").strip()
+        low_title = raw_title.lower()
+
+        # Si el título HTML es específico, lo conservamos.
+        if raw_title and "infoleg" not in low_title and "ministerio" not in low_title:
+            return raw_title
+
+        # Intenta extraer el epígrafe legal desde el cuerpo de texto.
+        text = re.sub(r"\s+", " ", texto_fuente).strip()
+        pattern = re.compile(
+            rf"ley\s+{law_id}\s*(.+?)(?:\.\s*sancionad[ao]|\.\s*promulgad[ao]|\s+sancionad[ao]:|\s+promulgad[ao]:)",
+            flags=re.IGNORECASE,
+        )
+        match = pattern.search(text)
+        if match:
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" .-:\t")
+            if candidate:
+                return f"Ley {law_id} - {candidate}"[:240]
+
+        return f"Ley {law_id}"
+
+    @staticmethod
+    def _extract_keywords_from_chunks(
+        law_id: int,
+        title_text: str,
+        chunks_estructurados: list[dict[str, object]],
+        max_keywords: int = 12,
+    ) -> list[str]:
+        """Deriva keywords compactas para facilitar identificacion rapida de la ley."""
+
+        stop = {
+            "ley",
+            "art",
+            "articulo",
+            "artículo",
+            "titulo",
+            "título",
+            "capitulo",
+            "capítulo",
+            "seccion",
+            "sección",
+            "de",
+            "del",
+            "la",
+            "el",
+            "los",
+            "las",
+            "y",
+            "en",
+            "para",
+            "por",
+            "con",
+            "que",
+            "sobre",
+            "norma",
+        }
+
+        bag = f"{title_text} " + " ".join(
+            str(chunk.get("title", "")) for chunk in chunks_estructurados[:40]
+        )
+        tokens = re.findall(r"[a-záéíóúñ0-9]{4,}", bag.lower())
+
+        counts: dict[str, int] = {}
+        for token in tokens:
+            if token in stop:
+                continue
+            counts[token] = counts.get(token, 0) + 1
+
+        ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        keywords = [f"ley-{law_id}"]
+        keywords.extend([term for term, _count in ordered[: max_keywords - 1]])
+        return keywords[:max_keywords]
+
+    @staticmethod
+    def _generate_law_summary(
+        title: str,
+        chunks_estructurados: list[dict[str, object]],
+        max_chunks: int = 30,
+    ) -> str | None:
+        """Genera un resumen breve de la ley usando el LLM, a partir de sus primeros chunks.
+
+        Se ejecuta una sola vez al ingestar. El resultado se persiste en rag_laws.summary_text.
+        """
+
+        if not settings.OPENAI_API_KEY:
+            return None
+
+        try:
+            sample = chunks_estructurados[:max_chunks]
+            context_lines = []
+            for chunk in sample:
+                chunk_title = str(chunk.get("title", "")).strip()
+                chunk_text = str(chunk.get("text", "")).strip()
+                if chunk_title:
+                    context_lines.append(f"[{chunk_title}] {chunk_text}")
+                else:
+                    context_lines.append(chunk_text)
+            context_block = "\n\n".join(context_lines)
+
+            prompt = PromptTemplate.from_template(
+                "Tenés el texto de la ley argentina '{titulo}'. "
+                "Redactá un resumen claro de 3 a 5 oraciones para público general que explique:\n"
+                "- De qué trata la ley\n"
+                "- A quiénes aplica\n"
+                "- Los 2 o 3 temas principales que regula\n\n"
+                "Usá SOLO la información del contexto provisto. "
+                "Escribí en español neutro, sin tecnicismos innecesarios.\n\n"
+                "Contexto:\n{contexto}"
+            )
+            llm = ChatOpenAI(
+                model=settings.OPENAI_QUERY_MODEL,
+                api_key=lambda: settings.OPENAI_API_KEY or "",
+                temperature=0,
+            )
+            result = (prompt | llm | StrOutputParser()).invoke(
+                {"titulo": title, "contexto": context_block}
+            )
+            cleaned = result.strip()
+            return cleaned if cleaned else None
+        except Exception:
+            return None
+
     def ingest_law_from_infoleg(
         self,
         law_id: int,
@@ -532,7 +750,7 @@ class LocalRAGService:
     ) -> InfolegIngestResult:
         """Ingiere una ley desde InfoLEG, la fragmenta semánticamente y la persiste."""
 
-        infoleg_id, search_url = self._buscar_id_norma_infoleg(law_id)
+        infoleg_id, search_url, official_summary = self._buscar_id_norma_infoleg(law_id)
         ver_norma_url = self._url_ver_norma(infoleg_id)
 
         ver_response = requests.get(ver_norma_url, timeout=20)
@@ -552,6 +770,19 @@ class LocalRAGService:
         soup = BeautifulSoup(texact_response.text, "html.parser")
         texto_fuente_directo = soup.get_text(" ", strip=True)
         texto_fuente = re.sub(r"\s+", " ", texto_fuente_directo).strip()
+
+        # Si texact.htm devuelve error, intentar con norma.htm como fallback.
+        if not texto_fuente or self._is_infoleg_error_page(texto_fuente):
+            norma_url = self._url_norma_fallback(infoleg_id)
+            if norma_url != texact_url:
+                norma_response = requests.get(norma_url, timeout=30)
+                norma_response.raise_for_status()
+                norma_response.encoding = norma_response.apparent_encoding or "utf-8"
+                sha256_hash = hashlib.sha256(norma_response.content).hexdigest()
+                soup = BeautifulSoup(norma_response.text, "html.parser")
+                texto_fuente_directo = soup.get_text(" ", strip=True)
+                texto_fuente = re.sub(r"\s+", " ", texto_fuente_directo).strip()
+                texact_url = norma_url  # usar norma.htm como source_uri
 
         if not texto_fuente:
             raise ValueError(
@@ -580,7 +811,11 @@ class LocalRAGService:
         else:
             source_norma = self._url_norma_fallback(infoleg_id)
 
-        title_text = soup.title.get_text(strip=True) if soup.title else f"Ley {law_id}"
+        title_text = self._derive_law_title(
+            law_id,
+            soup.title.get_text(strip=True) if soup.title else None,
+            texto_fuente,
+        )
 
         metadata_doc: dict[str, object] = {
             "source": "INFOLEG",
@@ -632,6 +867,28 @@ class LocalRAGService:
             replace_existing=replace_existing,
         )
 
+        law_summary = official_summary or self._generate_law_summary(
+            title_text,
+            chunks_estructurados,
+        )
+
+        rag_store.upsert_law_catalog_entry(
+            law_id=law_id,
+            law_number=str(law_id),
+            title=title_text,
+            hash_tag=self._build_law_hashtag(law_id, title_text),
+            source_link=source_uri,
+            promulgated_on=self._extract_promulgated_on(texto_fuente),
+            keywords=self._extract_keywords_from_chunks(
+                law_id,
+                title_text,
+                chunks_estructurados,
+            ),
+            summary_text=law_summary,
+            last_document_id=document_id,
+        )
+
+        question_cache_store.invalidate_by_law_id(law_id)
         self.refresh()
 
         return InfolegIngestResult(
@@ -652,10 +909,109 @@ class LocalRAGService:
 
         return {token for token in re.findall(r"[A-Za-z0-9_]{2,}", text.lower())}
 
+    def _semantic_rank(
+        self,
+        query: str,
+        pool_k: int,
+    ) -> list[tuple[int, float]]:
+        """Obtiene ranking semántico como pares (index_chunk, score)."""
+
+        if self._faiss_index is None or not self._vectors or pool_k <= 0:
+            return []
+
+        try:
+            import numpy as np
+
+            query_vector = embedding_service.embed_texts([query])[0]
+            matrix = np.array([query_vector], dtype="float32")
+            scores, indexes = self._faiss_index.search(matrix, pool_k)
+        except Exception:
+            return []
+
+        ranked: list[tuple[int, float]] = []
+        for score, idx in zip(scores[0], indexes[0]):
+            if idx < 0 or idx >= len(self._chunks):
+                continue
+            ranked.append((int(idx), float(score)))
+        return ranked
+
+    def _lexical_rank(
+        self,
+        query_tokens: set[str],
+        pool_k: int,
+    ) -> list[tuple[int, float]]:
+        """Obtiene ranking léxico como pares (index_chunk, score)."""
+
+        if not query_tokens or pool_k <= 0:
+            return []
+
+        scored_chunks: list[tuple[float, int]] = []
+        for idx, chunk in enumerate(self._chunks):
+            chunk_tokens = self._tokenize(chunk.text)
+            if not chunk_tokens:
+                continue
+
+            overlap = len(query_tokens.intersection(chunk_tokens))
+            if overlap == 0:
+                continue
+
+            score = overlap / math.sqrt(len(chunk_tokens))
+            scored_chunks.append((score, idx))
+
+        scored_chunks.sort(key=lambda item: item[0], reverse=True)
+        selected = scored_chunks[:pool_k]
+        return [(idx, score) for score, idx in selected]
+
+    @staticmethod
+    def _fuse_rrf(
+        semantic_rank: list[tuple[int, float]],
+        lexical_rank: list[tuple[int, float]],
+        top_k: int,
+        k: int = 60,
+    ) -> list[tuple[int, float]]:
+        """Fusiona rankings con Reciprocal Rank Fusion (RRF)."""
+
+        if top_k <= 0:
+            return []
+
+        rrf_scores: dict[int, float] = {}
+        semantic_positions = {
+            idx: pos for pos, (idx, _score) in enumerate(semantic_rank, start=1)
+        }
+        lexical_positions = {
+            idx: pos for pos, (idx, _score) in enumerate(lexical_rank, start=1)
+        }
+
+        for idx in semantic_positions:
+            rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (
+                k + semantic_positions[idx]
+            )
+        for idx in lexical_positions:
+            rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (
+                k + lexical_positions[idx]
+            )
+
+        semantic_score_map = {idx: score for idx, score in semantic_rank}
+        lexical_score_map = {idx: score for idx, score in lexical_rank}
+
+        fused = sorted(
+            rrf_scores.items(),
+            key=lambda item: (
+                item[1],
+                semantic_score_map.get(item[0], float("-inf")),
+                lexical_score_map.get(item[0], float("-inf")),
+            ),
+            reverse=True,
+        )
+        return fused[:top_k]
+
     def retrieve(self, query: str, top_k: int) -> list[dict[str, object]]:
-        """Recupera los chunks más relevantes usando FAISS o scoring léxico."""
+        """Recupera chunks con búsqueda híbrida (semántica + léxica) y fusión RRF."""
 
         if not settings.RAG_ENABLED:
+            return []
+
+        if top_k <= 0:
             return []
 
         self._load_chunks()
@@ -666,59 +1022,47 @@ class LocalRAGService:
         if not query_tokens:
             return []
 
-        # Preferred path: semantic retrieval via FAISS.
-        if self._faiss_index is not None and self._vectors:
-            try:
-                import numpy as np
+        pool_k = min(len(self._chunks), max(top_k * 3, top_k))
+        semantic_rank = self._semantic_rank(query, pool_k)
+        lexical_rank = self._lexical_rank(query_tokens, pool_k)
 
-                query_vector = embedding_service.embed_texts([query])[0]
-                matrix = np.array([query_vector], dtype="float32")
-                scores, indexes = self._faiss_index.search(matrix, max(top_k, 0))
+        if semantic_rank and lexical_rank:
+            fused = self._fuse_rrf(semantic_rank, lexical_rank, top_k)
+            return [
+                {
+                    "text": self._chunks[idx].text,
+                    "source": self._chunks[idx].source,
+                    "score": round(score, 6),
+                    "metadata": self._chunks[idx].metadata,
+                }
+                for idx, score in fused
+            ]
 
-                results: list[dict[str, object]] = []
-                for score, idx in zip(scores[0], indexes[0]):
-                    if idx < 0 or idx >= len(self._chunks):
-                        continue
-                    chunk = self._chunks[idx]
-                    results.append(
-                        {
-                            "text": chunk.text,
-                            "source": chunk.source,
-                            "score": round(float(score), 4),
-                            "metadata": chunk.metadata,
-                        }
-                    )
-                if results:
-                    return results
-            except Exception:
-                pass
+        if semantic_rank:
+            selected = semantic_rank[:top_k]
+            return [
+                {
+                    "text": self._chunks[idx].text,
+                    "source": self._chunks[idx].source,
+                    "score": round(score, 4),
+                    "metadata": self._chunks[idx].metadata,
+                }
+                for idx, score in selected
+            ]
 
-        # Fallback: lexical token overlap.
-        scored_chunks: list[tuple[float, RAGChunk]] = []
-        for chunk in self._chunks:
-            chunk_tokens = self._tokenize(chunk.text)
-            if not chunk_tokens:
-                continue
+        if lexical_rank:
+            selected = lexical_rank[:top_k]
+            return [
+                {
+                    "text": self._chunks[idx].text,
+                    "source": self._chunks[idx].source,
+                    "score": round(score, 4),
+                    "metadata": self._chunks[idx].metadata,
+                }
+                for idx, score in selected
+            ]
 
-            overlap = len(query_tokens.intersection(chunk_tokens))
-            if overlap == 0:
-                continue
-
-            score = overlap / math.sqrt(len(chunk_tokens))
-            scored_chunks.append((score, chunk))
-
-        scored_chunks.sort(key=lambda item: item[0], reverse=True)
-        selected = scored_chunks[: max(top_k, 0)]
-
-        return [
-            {
-                "text": chunk.text,
-                "source": chunk.source,
-                "score": round(score, 4),
-                "metadata": chunk.metadata,
-            }
-            for score, chunk in selected
-        ]
+        return []
 
 
 rag_service = LocalRAGService()

@@ -9,6 +9,7 @@ class NewsContext(BaseModel):
 
 class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
+    top_k: int = Field(default=5, ge=5, le=20)
 
 
 class UsedChunk(BaseModel):

@@ -18,13 +18,17 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_QUERY_MODEL: str = "gpt-4o-mini"
+    OPENAI_RESPONSE_TEMPERATURE: float = 0.1
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     LANGSMITH_TRACING: bool = False
     LANGSMITH_API_KEY: str | None = None
     LANGSMITH_PROJECT: str = "sinmentiras-backend"
 
     RAG_ENABLED: bool = True
-    RAG_TOP_K: int = 3
+    RAG_TOP_K: int = 5
+    RAG_REWRITER_ENABLED: bool = True
+    RAG_HYDE_ENABLED: bool = True
     RAG_KNOWLEDGE_PATHS: list[str] = ["app/knowledge"]
     RAG_DB_PATH: str = "app/data/rag.sqlite3"
     RAG_USE_FAISS: bool = True

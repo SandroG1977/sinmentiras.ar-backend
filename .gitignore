@@ -34,3 +34,5 @@ Documentos Internos - NO PUBLICAR/
 *.xlsx
 *.pdf
 app/data/cache.sqlite3
+app/data/rag.sqlite3
+app/data/cache.sqlite3

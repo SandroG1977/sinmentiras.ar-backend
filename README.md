@@ -47,7 +47,7 @@ This backend now includes a lightweight local RAG retriever.
 
 ```bash
 RAG_ENABLED=true
-RAG_TOP_K=3
+RAG_TOP_K=5
 RAG_KNOWLEDGE_PATHS=app/knowledge
 ```
 

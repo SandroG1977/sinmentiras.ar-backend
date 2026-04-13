@@ -1,5 +1,5 @@
 from app.core.config import settings
-from app.services.rag_service import LocalRAGService
+from app.services.rag_service import LocalRAGService, RAGChunk
 from app.services.rag_store import rag_store
 
 
@@ -86,5 +86,93 @@ def test_ingest_law_from_infoleg_persists_article_chunks(monkeypatch, tmp_path) 
         assert any(
             "cantidad_notas_substitucion" in row["metadata"] for row in persisted
         )
+
+        law_catalog = rag_store.get_law_catalog_entry(20744)
+        assert law_catalog is not None
+        assert law_catalog["law_id"] == 20744
+        assert law_catalog["law_number"] == "20744"
+        assert "ley 20744" in str(law_catalog["title"]).lower()
+        assert str(law_catalog["hash_tag"]).startswith("#ley20744")
+        assert "texact.htm" in str(law_catalog["source_link"]).lower()
+        assert isinstance(law_catalog.get("keywords"), list)
+        assert (
+            "summary_text" in law_catalog
+        )  # field always present (may be None when API key absent)
+        assert law_catalog["ingested_at"] is not None
     finally:
         settings.RAG_DB_PATH = old_db_path
+
+
+def test_retrieve_hybrid_rrf_prioritizes_chunk_supported_by_both_rankings(
+    monkeypatch,
+) -> None:
+    class _FakeFaissIndex:
+        def search(self, _matrix, _k):
+            import numpy as np
+
+            # Semantic ranking alone would put chunk 0 ahead of chunk 1.
+            return np.array([[0.92, 0.90, 0.40]], dtype="float32"), np.array(
+                [[0, 1, 2]], dtype="int64"
+            )
+
+    old_enabled = settings.RAG_ENABLED
+    try:
+        settings.RAG_ENABLED = True
+
+        rag = LocalRAGService()
+        rag._loaded = True
+        rag._chunks = [
+            RAGChunk(text="Reglas generales del contrato de trabajo.", source="a"),
+            RAGChunk(text="Limites de jornada laboral y horas maximas.", source="b"),
+            RAGChunk(text="Disposiciones complementarias de seguridad.", source="c"),
+        ]
+        rag._vectors = [[0.1], [0.2], [0.3]]
+        rag._faiss_index = _FakeFaissIndex()
+
+        monkeypatch.setattr(
+            "app.services.rag_service.embedding_service.embed_texts",
+            lambda _texts: [[0.5]],
+        )
+
+        results = rag.retrieve("jornada horas", top_k=2)
+
+        assert results
+        assert "jornada laboral" in str(results[0]["text"]).lower()
+    finally:
+        settings.RAG_ENABLED = old_enabled
+
+
+def test_generate_law_summary_returns_llm_output(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(settings, "OPENAI_QUERY_MODEL", "gpt-4o-mini")
+
+    from langchain_core.runnables import RunnableLambda
+
+    monkeypatch.setattr(
+        "app.services.rag_service.ChatOpenAI",
+        lambda **_kwargs: RunnableLambda(
+            lambda _input: "La ley regula el trabajo en Argentina."
+        ),
+    )
+
+    from app.services.rag_service import LocalRAGService
+
+    chunks = [
+        {"title": "Objeto", "text": "Regula el contrato de trabajo."},
+        {"title": "Alcance", "text": "Aplica a trabajadores privados."},
+    ]
+    summary = LocalRAGService._generate_law_summary(
+        "Ley de Contrato de Trabajo", chunks
+    )
+    assert summary is not None
+    assert "ley" in summary.lower()
+
+
+def test_generate_law_summary_returns_none_without_api_key(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+
+    from app.services.rag_service import LocalRAGService
+
+    chunks = [{"title": "Objeto", "text": "Texto de prueba."}]
+    summary = LocalRAGService._generate_law_summary("Ley X", chunks)
+    assert summary is None
