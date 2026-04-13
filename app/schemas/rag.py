@@ -1,6 +1,14 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 
+VERDICT_LABELS = Literal[
+    "VERDADERO",
+    "FALSO",
+    "INCONSISTENCIA TÉCNICA",
+    "AMBIGUO",
+    "SIN INFORMACIÓN",
+]
+
 
 class RAGIngestMinIORequest(BaseModel):
     minio_path: str | None = Field(default=None, min_length=1, max_length=2048)
@@ -98,3 +106,30 @@ class RAGLawStatusResponse(BaseModel):
     latest_source_actualizado: str | None = None
     latest_source_norma: str | None = None
     latest_sha256_hash: str | None = None
+
+
+# --- Resolution (audit) schemas ---
+
+
+class NewsItem(BaseModel):
+    source: str
+    title: str
+    sentiment: Literal["positive", "negative", "neutral"]
+
+
+class ResolutionRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=5000)
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+class ResolutionResponse(BaseModel):
+    id: str
+    query: str
+    verdict: str
+    summary_ia: str
+    hash: str
+    source_law: str
+    source_url: str
+    original_text: str
+    highlights: list[str]
+    news_context: list[NewsItem]

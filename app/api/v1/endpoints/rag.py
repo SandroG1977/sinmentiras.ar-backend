@@ -17,12 +17,18 @@ from app.schemas.rag import (
     RAGSource,
     RAGTruthIndexRequest,
     RAGTruthIndexResponse,
+    ResolutionRequest,
+    ResolutionResponse,
 )
 from app.services.document_text_service import document_text_service
 from app.services.legislative_metadata_service import legislative_metadata_service
 from app.services.minio_service import minio_service
 from app.services.rag_service import rag_service
-from app.services.rag_qa_service import answer_question, calculate_truth_index
+from app.services.rag_qa_service import (
+    answer_question,
+    calculate_truth_index,
+    resolve_query,
+)
 from app.services.rag_store import rag_store
 from app.services.text_chunker import chunk_text_by_article
 
@@ -276,5 +282,18 @@ def calculate_truth_index_endpoint(payload: "RAGTruthIndexRequest") -> dict:
     try:
         result = calculate_truth_index(payload.statement, payload.top_k)
         return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/resolve", response_model=ResolutionResponse)
+def resolve_question(payload: ResolutionRequest) -> ResolutionResponse:
+    """Resolve a question against legal knowledge and return a structured audit resolution.
+
+    Returns verdict, AI summary, source law, key highlights, and hash.
+    """
+    try:
+        result = resolve_query(payload.question, payload.top_k)
+        return ResolutionResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

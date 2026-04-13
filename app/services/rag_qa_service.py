@@ -1,6 +1,9 @@
 """RAG Q&A service - Answer questions and evaluate truth index using legal documents."""
 
 import json
+import uuid
+from datetime import datetime, timezone
+from hashlib import sha256 as _sha256
 
 from app.core.config import settings
 from app.services.rag_service import rag_service
@@ -175,3 +178,118 @@ Responde SOLO JSON válido con este formato:
     resultado["context_used"] = context
 
     return resultado
+
+
+def resolve_query(question: str, top_k: int = 5) -> dict[str, object]:
+    """Resolve a question and return a structured audit resolution.
+
+    Returns a dict matching ResolutionResponse:
+        id, query, verdict, summary_ia, hash, source_law,
+        source_url, original_text, highlights, news_context
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+    except ImportError as exc:
+        raise RuntimeError("langchain_openai required for resolve_query") from exc
+
+    if not settings.OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY not configured")
+
+    results = rag_service.retrieve(question, top_k)
+
+    if not results:
+        year = datetime.now(timezone.utc).year
+        short_id = uuid.uuid4().hex[:6].upper()
+        return {
+            "id": f"AUD-{year}-{short_id}",
+            "query": question,
+            "verdict": "SIN INFORMACIÓN",
+            "summary_ia": "No se encontró información relevante en la base de conocimientos legales.",
+            "hash": f"sha256:{_sha256(question.encode()).hexdigest()}",
+            "source_law": "",
+            "source_url": "",
+            "original_text": "",
+            "highlights": [],
+            "news_context": [],
+        }
+
+    # Build context and pick the best source (highest score)
+    context_parts: list[str] = []
+    best_source = results[0]
+    for r in results:
+        context_parts.append(str(r.get("text", "")))
+        if r.get("score", 0) > best_source.get("score", 0):
+            best_source = r
+
+    context = "\n\n".join(context_parts)
+
+    # Extract source metadata for the best chunk
+    meta: dict = best_source.get("metadata", {})
+    source_law = (
+        meta.get("source_norma")
+        or meta.get("ley_numero")
+        or best_source.get("source", "")
+    )
+    source_url = meta.get("publicado_en") or meta.get("source_uri", "")
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """Eres un auditor legal argentino. Dada una pregunta y el contexto legal,
+debes generar una resolución estructurada.
+Responde ÚNICAMENTE con un JSON válido con este esquema exacto:
+{
+  "verdict": "<uno de: VERDADERO | FALSO | INCONSISTENCIA TÉCNICA | AMBIGUO | SIN INFORMACIÓN>",
+  "summary_ia": "<explicación clara y técnica de 2-4 oraciones>",
+  "original_text": "<fragmento textual más relevante del contexto legal>",
+  "highlights": ["<frase clave 1>", "<frase clave 2>"]
+}
+- verdict: clasifica la afirmación implícita en la pregunta
+- summary_ia: explica el veredicto con base en el texto legal
+- original_text: copia literal del fragmento más determinante
+- highlights: 1-3 frases clave del original_text""",
+            ),
+            (
+                "human",
+                "Pregunta: {pregunta}\n\nContexto legal:\n{contexto}",
+            ),
+        ]
+    )
+
+    model = ChatOpenAI(
+        model=settings.OPENAI_MODEL,
+        api_key=settings.OPENAI_API_KEY,
+    )
+    chain = prompt | model | StrOutputParser()
+
+    raw = chain.invoke({"pregunta": question, "contexto": context})
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = {
+            "verdict": "AMBIGUO",
+            "summary_ia": raw,
+            "original_text": best_source.get("text", ""),
+            "highlights": [],
+        }
+
+    year = datetime.now(timezone.utc).year
+    short_id = uuid.uuid4().hex[:6].upper()
+    summary_hash = _sha256(parsed.get("summary_ia", "").encode()).hexdigest()
+
+    return {
+        "id": f"AUD-{year}-{short_id}",
+        "query": question,
+        "verdict": parsed.get("verdict", "AMBIGUO"),
+        "summary_ia": parsed.get("summary_ia", ""),
+        "hash": f"sha256:{summary_hash}",
+        "source_law": str(source_law),
+        "source_url": str(source_url),
+        "original_text": parsed.get("original_text", best_source.get("text", "")),
+        "highlights": parsed.get("highlights", []),
+        "news_context": [],
+    }
