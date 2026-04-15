@@ -6,6 +6,8 @@ on:
       - "app/**"
       - "tests/**"
       - "requirements.txt"
+      - "Dockerfile"
+      - "docker-compose.yml"
       - ".github/workflows/backend-ci-cd.yml"
   push:
     branches:
@@ -14,6 +16,8 @@ on:
       - "app/**"
       - "tests/**"
       - "requirements.txt"
+      - "Dockerfile"
+      - "docker-compose.yml"
       - ".github/workflows/backend-ci-cd.yml"
 
 jobs:
@@ -64,28 +68,13 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "${{ secrets.VPS_SSH_PORT }}" -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Sync repository to VPS
+      - name: Deploy via Docker Compose
         run: |
-          rsync -az --delete \
-            --exclude ".git" \
-            --exclude ".venv" \
-            --exclude "__pycache__" \
-            --exclude ".pytest_cache" \
-            -e "ssh -p ${{ secrets.VPS_SSH_PORT }}" \
-            ./ "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_APP_DIR }}/"
-
-      - name: Install deps and restart service
-        run: |
-          ssh -p "${{ secrets.VPS_SSH_PORT }}" "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }}" << 'EOF'
-          set -e
-          cd "${{ secrets.VPS_APP_DIR }}"
-
-          python3 -m venv .venv
-          . .venv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
-          sudo systemctl daemon-reload
-          sudo systemctl restart "${{ secrets.VPS_SYSTEMD_SERVICE }}"
-          sudo systemctl is-active --quiet "${{ secrets.VPS_SYSTEMD_SERVICE }}"
-          EOF
+          ssh -p "${{ secrets.VPS_SSH_PORT }}" \
+              "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }}" \
+              "set -e && \
+               cd '${{ secrets.VPS_APP_DIR }}' && \
+               git pull origin main && \
+               docker compose build --pull backend && \
+               docker compose up -d --remove-orphans backend && \
+               docker image prune -f"
