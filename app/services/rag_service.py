@@ -48,6 +48,16 @@ class LocalRAGService:
 
     _INFOLEG_BASE = "https://servicios.infoleg.gob.ar/infolegInternet"
     _INFOLEG_ATTACH_BASE = f"{_INFOLEG_BASE}/anexos"
+    _INFOLEG_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
 
     def __init__(self) -> None:
         """Inicializa caches en memoria y sincronización para carga diferida."""
@@ -194,6 +204,26 @@ class LocalRAGService:
             self._vectors = []
             self._faiss_index = None
 
+    def _infoleg_get(self, url: str, *, timeout: int = 30) -> requests.Response:
+        """Hace requests a InfoLEG con headers de navegador y un retry ante 403."""
+
+        response = requests.get(
+            url,
+            timeout=timeout,
+            headers=self._INFOLEG_HEADERS,
+            allow_redirects=True,
+        )
+        if response.status_code == 403:
+            # Retry simple para reducir falsos positivos por rate-limit/WAF.
+            response = requests.get(
+                url,
+                timeout=timeout,
+                headers=self._INFOLEG_HEADERS,
+                allow_redirects=True,
+            )
+        response.raise_for_status()
+        return response
+
     # Resolución y armado de URLs de InfoLEG.
     def _buscar_id_norma_infoleg(
         self,
@@ -207,8 +237,7 @@ class LocalRAGService:
             f"{self._INFOLEG_BASE}/buscarNormas.do?tipoNorma={tipo_norma}"
             f"&numero={numero_ley}&anioSancion={anio_sancion}"
         )
-        response = requests.get(search_url, timeout=20)
-        response.raise_for_status()
+        response = self._infoleg_get(search_url, timeout=20)
         response.encoding = response.apparent_encoding or "utf-8"
 
         match = re.search(
@@ -753,8 +782,7 @@ class LocalRAGService:
         infoleg_id, search_url, official_summary = self._buscar_id_norma_infoleg(law_id)
         ver_norma_url = self._url_ver_norma(infoleg_id)
 
-        ver_response = requests.get(ver_norma_url, timeout=20)
-        ver_response.raise_for_status()
+        ver_response = self._infoleg_get(ver_norma_url, timeout=20)
         ver_response.encoding = ver_response.apparent_encoding or "utf-8"
 
         texact_url = self._extraer_url_texact_desde_ver_norma(
@@ -762,8 +790,7 @@ class LocalRAGService:
             ver_norma_url,
         ) or self._url_texact_fallback(infoleg_id)
 
-        texact_response = requests.get(texact_url, timeout=30)
-        texact_response.raise_for_status()
+        texact_response = self._infoleg_get(texact_url, timeout=30)
         texact_response.encoding = texact_response.apparent_encoding or "utf-8"
 
         sha256_hash = hashlib.sha256(texact_response.content).hexdigest()
@@ -775,8 +802,7 @@ class LocalRAGService:
         if not texto_fuente or self._is_infoleg_error_page(texto_fuente):
             norma_url = self._url_norma_fallback(infoleg_id)
             if norma_url != texact_url:
-                norma_response = requests.get(norma_url, timeout=30)
-                norma_response.raise_for_status()
+                norma_response = self._infoleg_get(norma_url, timeout=30)
                 norma_response.encoding = norma_response.apparent_encoding or "utf-8"
                 sha256_hash = hashlib.sha256(norma_response.content).hexdigest()
                 soup = BeautifulSoup(norma_response.text, "html.parser")
